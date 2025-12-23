@@ -1,4 +1,4 @@
-# SPHiTZ - Aholab/HiTZ Speech Processing Pipeline (Diarization + ASR + C&P)
+# SPHiTZ - Aholab/HiTZ **S**peech **P**rocessing **P**ipeline (Diarization + ASR + C&P)
 
 This repository provides a full end-to-end pipeline for **speaker diarization**, **speech-to-text transcription**, **optional translation / correction & paraphrasing (C&P)**, and **subtitle generation**.
 
@@ -221,4 +221,5 @@ Under the following terms:
 - **Attribution** — You must give appropriate credit, provide a link to the license, and indicate if changes were made.
 
 Full license text: https://creativecommons.org/licenses/by/4.0/
+
 
