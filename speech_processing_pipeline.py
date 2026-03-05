@@ -15,6 +15,7 @@ from tqdm import tqdm
 def pyannote_seg(inputs, model_path, option, config_yml, device):
     from pyannote.audio import Model, Pipeline
     from pyannote.audio.pipelines import VoiceActivityDetection
+    from pyannote.audio.pipelines.utils.hook import ProgressHook
     """
     Perform segmentation (VAD or Diarization) using pyannote.
     - inputs: {'waveform': torch.Tensor (1,T), 'sample_rate': int}
@@ -30,7 +31,7 @@ def pyannote_seg(inputs, model_path, option, config_yml, device):
         config = yaml.load(fp, Loader=yaml.SafeLoader)
         
     config["pipeline"]["params"]["segmentation"] = model_path
-    print(f"- Pyannote Configuration:\n{yaml.dump(config)}")
+    print(f"[+] - Pyannote Configuration:\n{yaml.dump(config)}")
     
     if option == "diar":
         print("Option mode: Speaker Diarization\n")
@@ -38,7 +39,8 @@ def pyannote_seg(inputs, model_path, option, config_yml, device):
         
         # Perform segmentation
         pyannote_pipeline.to(torch.device(device))
-        result = pyannote_pipeline(inputs)  
+        with ProgressHook() as hook:
+            result = pyannote_pipeline(inputs, hook=hook)  
         result_tracks = result.exclusive_speaker_diarization.itertracks(yield_label=True)
         # result_tracks = result.itertracks(yield_label=True)
 
@@ -51,7 +53,8 @@ def pyannote_seg(inputs, model_path, option, config_yml, device):
          
         # Perform segmentation
         pyannote_pipeline.to(torch.device(device))
-        result = pyannote_pipeline(inputs)  
+        with ProgressHook() as hook:
+            result = pyannote_pipeline(inputs, hook=hook)  
         result_tracks = result.itertracks(yield_label=True)
     
     segment_item_list = []    
@@ -162,28 +165,10 @@ def nemo_inference(asr_model, audio, sr, time_stride, padd, segment_item_list, l
             end = int(round(seg_end * sr))
             audio_seg = audio[start:end]
             
-            seg_tensor = torch.tensor(audio_seg, dtype=torch.float32, device=device).unsqueeze(0)
+            seg_tensor = torch.tensor(audio_seg, dtype=torch.float32, device=device)
             if seg_duration >= 0.05:
                 try:
-                    # Preprocess to features
-                    features, features_len = asr_model.preprocessor(
-                        input_signal = seg_tensor,
-                        length = torch.tensor([seg_tensor.shape[1]], device=device)
-                    )
-
-                    # Encoder forward
-                    encoded, encoded_len = asr_model.encoder(
-                        audio_signal = features, 
-                        length = features_len
-                    )
-
-                    # RNNT decoding
-                    hypothesis = asr_model.decoding.rnnt_decoder_predictions_tensor(
-                        encoded, 
-                        encoded_len, 
-                        return_hypotheses = True
-                    )
-                    hypothesis = hypothesis[0]
+                    hypothesis = asr_model.transcribe(seg_tensor, batch_size=1, return_hypotheses=True)[0]
                     
                     # Extract words and timestamps
                     word_info_list = hypothesis.timestamp["word"]
@@ -204,7 +189,7 @@ def nemo_inference(asr_model, audio, sr, time_stride, padd, segment_item_list, l
                     
                 except RuntimeError as e:
                     if "CUDA out of memory" in str(e):
-                        print(f"\nWARNING: CUDA OOM during STT inference on segment {i}.\nDividing segment in half using a {padd}s padding and retrying.\n")
+                        print(f"\n[!] WARNING: CUDA OOM during STT inference on segment {i}.\nDividing segment in half using a {padd}s padding and retrying.\n")
                         mid_time = (seg_start + seg_end) / 2
                         
                         # Create two new segments with padding
@@ -216,18 +201,18 @@ def nemo_inference(asr_model, audio, sr, time_stride, padd, segment_item_list, l
                         # Recursive call to process the two new segments
                         subsegment_item_list = nemo_inference(asr_model=asr_model, audio=audio, sr=sr,
                                                             time_stride=time_stride, padd=padd,
-                                                            subsegment_item_list=segment_item_list,
+                                                            segment_item_list=subsegment_item_list,
                                                             lang=lang, device=device)
                         
                         # Merge sub segments in one original segment
                         segment_item = merge_subsegments(subsegment_item_list)
                         
                     else:
-                        print(f"\nWARNING: {e}\nSkipping segment {i}.\n")
+                        print(f"\n[!] WARNING: {e}\nSkipping segment {i}.\n")
                         segment_item["language"] = ""
                         segment_item["words"] = []
             else:
-                print(f"\nWARNING: Segment < 0.05s \nSkipping segment {i}.\n")
+                print(f"\n[!] WARNING: Segment < 0.05s \nSkipping segment {i}.\n")
                 segment_item["language"] = ""
                 segment_item["words"] = []
 
@@ -249,14 +234,17 @@ def nemo_asr(inputs, model_path, segment_item_list, lang, device):
     """    
     
     # Load nemo ASR model
-    asr_model = nemo_models.ASRModel.restore_from(model_path)
+    if model_path.endswith(".nemo"):
+        asr_model = nemo_models.ASRModel.restore_from(model_path)
+    else:
+        asr_model = nemo_models.ASRModel.from_pretrained(model_path)
     decoding_cfg = asr_model.cfg.decoding
     with open_dict(decoding_cfg):
         decoding_cfg.greedy.preserve_alignments = True
         decoding_cfg.greedy.compute_timestamps = True
-        decoding_cfg.greedy.preserve_frame_confidence = True
-        decoding_cfg.confidence_cfg.preserve_frame_confidence = True
-        decoding_cfg.confidence_cfg.preserve_token_confidence = True
+        decoding_cfg.greedy.preserve_frame_confidence = False
+        decoding_cfg.confidence_cfg.preserve_frame_confidence = False
+        decoding_cfg.confidence_cfg.preserve_token_confidence = False
         decoding_cfg.confidence_cfg.preserve_word_confidence = True
         decoding_cfg.compute_timestamps = True
     asr_model.change_decoding_strategy(decoding_cfg)
@@ -529,7 +517,7 @@ def to_rttm(segment_item_list, out_filepath):
             end = segment_item["end"]
             duration = round(end-start,3)
             rttm_file.write(f"SPEAKER {name.replace('.rttm','')} 1 {start:.3f} {duration:.3f} <NA> <NA> {segment_item['speaker']} <NA> <NA>\n")
-    print(f"End Writing RTTM:\n- {out_filepath}")
+    print(f"[+] End Writing RTTM:\n- {out_filepath}")
 
 def to_xml(segment_item_list, out_filepath):
     out_filepath = out_filepath + ".xml"
@@ -544,7 +532,7 @@ def to_xml(segment_item_list, out_filepath):
     pretty_xml = reparsed.toprettyxml(indent="    ")
     with open(out_filepath, 'w', encoding='utf-8') as xml_file:
         xml_file.write(pretty_xml)
-    print(f"End Writing XML:\n- {out_filepath}")
+    print(f"[+] End Writing XML:\n- {out_filepath}")
     
 def to_trs():
     pass
@@ -570,7 +558,7 @@ def to_json(segment_item_list, out_filepath):
                 "words": segment_item['words']
             }
             json_file.write(json.dumps(item, ensure_ascii=False) + "\n")
-    print(f"End Writing JSON:\n- {out_filepath}")  
+    print(f"[+] End Writing JSON:\n- {out_filepath}")  
 
 def to_txt(segment_item_list, out_filepath):
     cp_write = False
@@ -579,12 +567,12 @@ def to_txt(segment_item_list, out_filepath):
             txt_file.write(segment_item['pred_text']+"\n")
             if segment_item['cp_pred_text'] != "" and not cp_write:
                 cp_write = True
-    print(f"End Writing TXT:\n- {out_filepath+'.txt'}")
+    print(f"[+] End Writing TXT:\n- {out_filepath+'.txt'}")
     if cp_write:
         with open(out_filepath+"_cp.txt","w",encoding="utf-8") as txt_file:
             for segment_item in segment_item_list:
                 txt_file.write(segment_item['cp_pred_text']+"\n")
-        print(f"End Writing C&P_TXT:\n- {out_filepath+'_cp.txt'}")
+        print(f"[+] End Writing C&P_TXT:\n- {out_filepath+'_cp.txt'}")
     
 def to_vtt(segment_item_list, out_filepath):
     cp_write = False
@@ -598,7 +586,7 @@ def to_vtt(segment_item_list, out_filepath):
             vtt_file.write(f"<c.{segment_item['color']}.bg_black>{segment_item['pred_text']}</c>\n\n")
             if segment_item['cp_pred_text'] != "" and not cp_write:
                 cp_write = True
-    print(f"End Writing VTT:\n- {out_filepath+'.vtt'}")
+    print(f"[+] End Writing VTT:\n- {out_filepath+'.vtt'}")
     if cp_write:
         with open(out_filepath+"_cp.vtt","w",encoding="utf-8") as vtt_file:
             vtt_file.write("WEBVTT\n\n")
@@ -608,7 +596,7 @@ def to_vtt(segment_item_list, out_filepath):
                 end_time=f"{(int(segment_item['end'])//3600):02}:{((int(segment_item['end'])%3600)//60):02}:{(int(segment_item['end'])%60):02}.{(int(((segment_item['end'])-int(segment_item['end']))*1000)):03}"
                 vtt_file.write(f"{start_time} --> {end_time} line:16 position:50% align:center\n")
                 vtt_file.write(f"<c.{segment_item['color']}.bg_black>{segment_item['cp_pred_text']}</c>\n\n")
-        print(f"End Writing C&P_VTT:\n- {out_filepath+'_cp.vtt'}")
+        print(f"[+] End Writing C&P_VTT:\n- {out_filepath+'_cp.vtt'}")
 
 def to_srt(segment_item_list, out_filepath):
     cp_write = False
@@ -621,7 +609,7 @@ def to_srt(segment_item_list, out_filepath):
             srt_file.write(f"<font  color=\"{segment_item['color']}\" back=\"black\" line=\"16\" position=\"50%\" align=\"center\">{segment_item['pred_text']}</font>\n\n")
             if segment_item['cp_pred_text'] != "" and not cp_write:
                 cp_write = True
-    print(f"End Writing SRT:\n- {out_filepath+'.srt'}")
+    print(f"[+] End Writing SRT:\n- {out_filepath+'.srt'}")
     if cp_write:
         with open(out_filepath+"_cp.srt","w",encoding="utf-8") as srt_file:
             for i, segment_item in enumerate(segment_item_list):
@@ -632,7 +620,7 @@ def to_srt(segment_item_list, out_filepath):
                 srt_file.write(f"<font  color=\"{segment_item['color']}\" back=\"black\" line=\"16\" position=\"50%\" align=\"center\">{segment_item['cp_pred_text']}</font>\n\n")
                 if segment_item['cp_pred_text'] != "" and not cp_write:
                     cp_write = True
-        print(f"End Writing C&P_SRT:\n- {out_filepath+'_cp.srt'}")
+        print(f"[+] End Writing C&P_SRT:\n- {out_filepath+'_cp.srt'}")
 
 ########################################################################################
 ######################################### RUNs #########################################
@@ -696,7 +684,8 @@ def run_cp(text, cp_model, device):
     
     return cp_text.strip()
 
-def run_all(audio_file, lang, seg_model, config_yml, seg_option, stt_model, cp_model, device, result_path):
+def run_all(audio_file, lang, seg_model, config_yml, seg_option, stt_model, cp_model, device, result_path, local=False):
+    torchaudio.set_audio_backend("sox_io")
     audio_name, _ = os.path.splitext(os.path.basename(audio_file))
     out_path = f"{result_path}/{audio_name}"
     target_sr = 16000 # All nemo models work with 16kHz audio
@@ -756,21 +745,25 @@ def run_all(audio_file, lang, seg_model, config_yml, seg_option, stt_model, cp_m
     to_srt(segment_item_list=segment_item_list, out_filepath=out_filepath)
 
     # Create .zip file and remove directory
-    timestamp = int(time.time())
-    zip_file = f"{result_path}/result_{timestamp}.zip"
-    shutil.make_archive(zip_file[:-4], "zip", out_path)
-    shutil.rmtree(out_path)
+    if not local:
+        timestamp = int(time.time())
+        zip_file = f"{result_path}/result_{timestamp}.zip"
+        shutil.make_archive(zip_file[:-4], "zip", out_path)
+        shutil.rmtree(out_path)
 
-    # Prepare the sample_text for the web
-    max_samples = 3
-    samples = len(segment_item_list) if len(segment_item_list) < max_samples else max_samples
+        # Prepare the sample_text for the web
+        max_samples = 3
+        samples = len(segment_item_list) if len(segment_item_list) < max_samples else max_samples
 
-    sample_text = ""
-    for segment_item in segment_item_list[:samples]:
-        sample_text += segment_item["pred_text"] + " "
-    sample_text = sample_text[:-1]+"..."
+        sample_text = ""
+        for segment_item in segment_item_list[:samples]:
+            sample_text += segment_item["pred_text"] + " "
+        sample_text = sample_text[:-1]+"..."
 
-    return sample_text, zip_file
+        return sample_text, zip_file
+    else:
+        print(f"[+] Finish processing: {audio_name}")
+        return None, None 
 
 ########################################################################################
 ######################################### MAIN #########################################
@@ -787,6 +780,7 @@ def main(args):
     stt_model = args.stt_model
     cp_model = args.cp_model
     device = args.device
+    local = args.local
 
     # Assuming model name contains language code, in the future need to improve this
     if "eu" in os.path.basename(stt_model):
@@ -802,9 +796,9 @@ def main(args):
                                         seg_model=seg_model, config_yml=config_yml,
                                         seg_option=seg_option, stt_model=stt_model,
                                         cp_model=cp_model, device=device,
-                                        result_path=result_path)
-        
-        print(json.dumps({"sample_text": sample_text, "zip_file": zip_file}))
+                                        result_path=result_path, local=local)
+        if not local:
+            print(json.dumps({"sample_text": sample_text, "zip_file": zip_file}))
 
     elif run_mode == "diar":
         rttm_file, png_file = run_diar(audio_file=audio_file, seg_model=seg_model,
@@ -830,5 +824,6 @@ if __name__=="__main__":
     parser.add_argument("--stt_model", help="(str): path to stt model (NeMo)", default="stt_eu_conformer_transducer_v1.7", type=str)
     parser.add_argument("--cp_model", help="(str): path to capitalization & punctuation model (MarianMT)", default="", type=str)
     parser.add_argument("--device", help="(str): 'cuda' or 'cpu'", default="cpu", type=str)
+    parser.add_argument("--local", help="(bool): True --> Don't zip file; False --> Zip files", default=False, action='store_true')
     args = parser.parse_args()
     main(args)

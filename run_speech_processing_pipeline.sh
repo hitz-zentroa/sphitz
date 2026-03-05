@@ -4,14 +4,14 @@ start_time=$(date +%s)
 
 python speech_processing_pipeline.py \
     --run_mode="all" \
-    --audio_file="audio.wav" \
+    --audio_file="./audios/common_voice_eu_18251595.wav" \
     --input_text="" \
     --out_path="./results" \
-    --seg_model="seg_CONF.ckpt" \
-    --seg_config_yml="config.yaml" \
+    --seg_model="./models/diar/seg_CONF.ckpt" \
+    --seg_config_yml="./models/diar/seg_config.yaml" \
     --seg_option="diar" \
-    --stt_model="stt_eu_conformer_transducer_large.nemo" \
-    --cp_model="eu_norm-eu" \
+    --stt_model="./models/asr/stt_eu_conformer_transducer_large_v2.nemo" \
+    --cp_model="./models/marianmt/eu_norm-eu" \
     --device="cuda"
 
 echo

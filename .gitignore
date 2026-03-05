@@ -1,3 +1,6 @@
 .vscode/
 experiments/
 results/
+models/
+logs/
+run_batch_*
