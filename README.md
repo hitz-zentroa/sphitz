@@ -206,6 +206,9 @@ audio.png
   - Results merged with confidence weighting  
 
 ---
+## Acknowledgements
+
+This work has been partially supported by the Basque Government (IKER-GAITU project), the Spanish Ministry for Digital Transformation and of Civil Service, and the EU-funded NextGenerationEU Recovery, Transformation and Resilience Plan (ILENIA project, 2022/TL-22/00215335 & ALIA).
 
 ## License
 
